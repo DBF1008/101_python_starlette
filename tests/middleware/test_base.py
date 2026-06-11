@@ -600,7 +600,7 @@ def test_read_request_stream_in_app_after_middleware_calls_stream(
     test_client_factory: TestClientFactory,
 ) -> None:
     async def homepage(request: Request) -> PlainTextResponse:
-        expected = [b""]
+        expected = [b"a", b""]
         async for chunk in request.stream():
             assert chunk == expected.pop(0)
         assert expected == []
@@ -661,7 +661,7 @@ def test_read_request_body_in_app_after_middleware_calls_stream(
     test_client_factory: TestClientFactory,
 ) -> None:
     async def homepage(request: Request) -> PlainTextResponse:
-        assert await request.body() == b""
+        assert await request.body() == b"a"
         return PlainTextResponse("Homepage")
 
     class ConsumingMiddleware(BaseHTTPMiddleware):
@@ -1316,3 +1316,230 @@ def test_error_context_propagation(test_client_factory: TestClientFactory) -> No
     assert str(ctx.value) == "Outer exception"
     assert ctx.value.__cause__ is not None
     assert str(ctx.value.__cause__) == "Inner exception"
+
+
+def test_read_request_form_urlencoded_in_app_after_middleware_calls_body(
+    test_client_factory: TestClientFactory,
+) -> None:
+    async def homepage(request: Request) -> PlainTextResponse:
+        async with request.form() as form:
+            assert form["field"] == "value"
+        return PlainTextResponse("Homepage")
+
+    class ConsumingMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self,
+            request: Request,
+            call_next: RequestResponseEndpoint,
+        ) -> Response:
+            body = await request.body()
+            assert b"field=value" in body
+            return await call_next(request)
+
+    app = Starlette(
+        routes=[Route("/", homepage, methods=["POST"])],
+        middleware=[Middleware(ConsumingMiddleware)],
+    )
+
+    client: TestClient = test_client_factory(app)
+    response = client.post("/", data={"field": "value"})
+    assert response.status_code == 200
+
+
+def test_read_request_form_urlencoded_in_app_after_middleware_calls_stream(
+    test_client_factory: TestClientFactory,
+) -> None:
+    async def homepage(request: Request) -> PlainTextResponse:
+        async with request.form() as form:
+            assert form["field"] == "value"
+        return PlainTextResponse("Homepage")
+
+    class ConsumingMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self,
+            request: Request,
+            call_next: RequestResponseEndpoint,
+        ) -> Response:
+            chunks = []
+            async for chunk in request.stream():
+                chunks.append(chunk)
+            body = b"".join(chunks)
+            assert b"field=value" in body
+            return await call_next(request)
+
+    app = Starlette(
+        routes=[Route("/", homepage, methods=["POST"])],
+        middleware=[Middleware(ConsumingMiddleware)],
+    )
+
+    client: TestClient = test_client_factory(app)
+    response = client.post("/", data={"field": "value"})
+    assert response.status_code == 200
+
+
+def test_read_request_form_multipart_in_app_after_middleware_calls_body(
+    test_client_factory: TestClientFactory,
+) -> None:
+    async def homepage(request: Request) -> PlainTextResponse:
+        async with request.form() as form:
+            assert form["field"] == "value"
+            upload = form["upload"]
+            assert upload.filename == "test.txt"  # type: ignore[union-attr]
+            content = await upload.read()  # type: ignore[union-attr]
+            assert content == b"file content"
+        return PlainTextResponse("Homepage")
+
+    class ConsumingMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self,
+            request: Request,
+            call_next: RequestResponseEndpoint,
+        ) -> Response:
+            body = await request.body()
+            assert len(body) > 0
+            return await call_next(request)
+
+    app = Starlette(
+        routes=[Route("/", homepage, methods=["POST"])],
+        middleware=[Middleware(ConsumingMiddleware)],
+    )
+
+    client: TestClient = test_client_factory(app)
+    response = client.post(
+        "/",
+        data={"field": "value"},
+        files={"upload": ("test.txt", b"file content", "text/plain")},
+    )
+    assert response.status_code == 200
+
+
+def test_read_request_form_multipart_in_app_after_middleware_calls_stream(
+    test_client_factory: TestClientFactory,
+) -> None:
+    async def homepage(request: Request) -> PlainTextResponse:
+        async with request.form() as form:
+            assert form["field"] == "value"
+            upload = form["upload"]
+            assert upload.filename == "test.txt"  # type: ignore[union-attr]
+            content = await upload.read()  # type: ignore[union-attr]
+            assert content == b"file content"
+        return PlainTextResponse("Homepage")
+
+    class ConsumingMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self,
+            request: Request,
+            call_next: RequestResponseEndpoint,
+        ) -> Response:
+            chunks = []
+            async for chunk in request.stream():
+                chunks.append(chunk)
+            assert len(b"".join(chunks)) > 0
+            return await call_next(request)
+
+    app = Starlette(
+        routes=[Route("/", homepage, methods=["POST"])],
+        middleware=[Middleware(ConsumingMiddleware)],
+    )
+
+    client: TestClient = test_client_factory(app)
+    response = client.post(
+        "/",
+        data={"field": "value"},
+        files={"upload": ("test.txt", b"file content", "text/plain")},
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_read_request_body_in_app_after_middleware_calls_stream_multi_chunk() -> None:
+    async def endpoint(scope: Scope, receive: Receive, send: Send) -> None:
+        request = Request(scope, receive)
+        body = await request.body()
+        assert body == b"chunk1chunk2chunk3"
+        await Response()(scope, receive, send)
+
+    class ConsumingMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self,
+            request: Request,
+            call_next: RequestResponseEndpoint,
+        ) -> Response:
+            chunks = []
+            async for chunk in request.stream():
+                chunks.append(chunk)
+            assert chunks == [b"chunk1", b"chunk2", b"chunk3", b""]
+            return await call_next(request)
+
+    async def rcv() -> AsyncGenerator[Message, None]:
+        yield {"type": "http.request", "body": b"chunk1", "more_body": True}
+        yield {"type": "http.request", "body": b"chunk2", "more_body": True}
+        yield {"type": "http.request", "body": b"chunk3", "more_body": False}
+        yield {"type": "http.disconnect"}
+        raise AssertionError("Should not be called, would hang")  # pragma: no cover
+
+    sent: list[Message] = []
+
+    async def send(msg: Message) -> None:
+        sent.append(msg)
+
+    app: ASGIApp = ConsumingMiddleware(endpoint)
+    rcv_stream = rcv()
+
+    await app({"type": "http"}, rcv_stream.__anext__, send)
+
+    assert sent == [
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-length", b"0")],
+        },
+        {"type": "http.response.body", "body": b"", "more_body": False},
+    ]
+
+    await rcv_stream.aclose()
+
+
+@pytest.mark.anyio
+async def test_disconnect_during_middleware_stream_consumption() -> None:
+    async def endpoint(scope: Scope, receive: Receive, send: Send) -> None:
+        msg = await receive()
+        assert msg["type"] == "http.disconnect"
+        await Response()(scope, receive, send)
+
+    class ConsumingMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self,
+            request: Request,
+            call_next: RequestResponseEndpoint,
+        ) -> Response:
+            with pytest.raises(ClientDisconnect):
+                async for _ in request.stream():
+                    pass
+            assert not hasattr(request, "_body")
+            return await call_next(request)
+
+    async def rcv() -> AsyncGenerator[Message, None]:
+        yield {"type": "http.disconnect"}
+        raise AssertionError("Should not be called, would hang")
+
+    sent: list[Message] = []
+
+    async def send(msg: Message) -> None:
+        sent.append(msg)
+
+    app: ASGIApp = ConsumingMiddleware(endpoint)
+    rcv_stream = rcv()
+
+    await app({"type": "http", "method": "POST", "path": "/"}, rcv_stream.__anext__, send)
+
+    assert sent == [
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-length", b"0")],
+        },
+        {"type": "http.response.body", "body": b"", "more_body": False},
+    ]
+
+    await rcv_stream.aclose()

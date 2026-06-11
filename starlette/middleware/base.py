@@ -19,17 +19,39 @@ T = TypeVar("T")
 
 class _CachedRequest(Request):
     """
-    If the user calls Request.body() from their dispatch function
-    we cache the entire request body in memory and pass that to downstream middlewares,
-    but if they call Request.stream() then all we do is send an
-    empty body so that downstream things don't hang forever.
+    If the user calls Request.body() or fully consumes Request.stream()
+    from their dispatch function, we cache the entire request body in memory
+    and replay it to downstream middlewares and endpoints, so they can
+    read the body via body(), stream(), or form() as usual.
     """
 
     def __init__(self, scope: Scope, receive: Receive):
         super().__init__(scope, receive)
         self._wrapped_rcv_disconnected = False
         self._wrapped_rcv_consumed = False
-        self._wrapped_rc_stream = self.stream()
+
+    async def stream(self) -> AsyncGenerator[bytes, None]:
+        if hasattr(self, "_body"):
+            yield self._body
+            yield b""
+            return
+        if self._stream_consumed:
+            raise RuntimeError("Stream consumed")
+        chunks: list[bytes] = []
+        while not self._stream_consumed:
+            message = await self._receive()
+            if message["type"] == "http.request":
+                body = message.get("body", b"")
+                if not message.get("more_body", False):
+                    self._stream_consumed = True
+                if body:
+                    chunks.append(body)
+                    yield body
+            elif message["type"] == "http.disconnect":
+                self._is_disconnected = True
+                raise ClientDisconnect()
+        self._body = b"".join(chunks)
+        yield b""
 
     async def wrapped_receive(self) -> Message:
         # wrapped_rcv state 1: disconnected
@@ -68,19 +90,22 @@ class _CachedRequest(Request):
                 "more_body": False,
             }
         elif self._stream_consumed:
-            # stream() was called to completion
-            # return an empty body so that downstream apps don't hang
-            # waiting for a disconnect
+            # Safety fallback: stream() was consumed but _body was not set.
+            # With the overridden stream() this should not happen in normal
+            # operation, but is kept as a guard.
             self._wrapped_rcv_consumed = True
             return {
                 "type": "http.request",
                 "body": b"",
                 "more_body": False,
             }
+        elif self._is_disconnected:
+            self._wrapped_rcv_disconnected = True
+            return {"type": "http.disconnect"}
         else:
             # body() was never called and stream() wasn't consumed
+            stream = self.stream()
             try:
-                stream = self.stream()
                 chunk = await stream.__anext__()
                 self._wrapped_rcv_consumed = self._stream_consumed
                 return {
@@ -91,6 +116,8 @@ class _CachedRequest(Request):
             except ClientDisconnect:
                 self._wrapped_rcv_disconnected = True
                 return {"type": "http.disconnect"}
+            finally:
+                await stream.aclose()
 
 
 class BaseHTTPMiddleware:
