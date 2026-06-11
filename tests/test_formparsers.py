@@ -838,3 +838,70 @@ def test_multipart_closes_tempfile_on_oserror(
         client.post("/", content=content, headers=headers)
 
     assert close_called
+
+
+def make_app_spool_size(spool_max_size: int) -> ASGIApp:
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        request = Request(scope, receive)
+        data = await request.form(spool_max_size=spool_max_size)
+        output: dict[str, Any] = {}
+        for key, value in data.items():
+            if isinstance(value, UploadFile):
+                content = await value.read()
+                output[key] = {
+                    "filename": value.filename,
+                    "size": value.size,
+                    "content": content.decode(),
+                    "in_memory": value._in_memory,
+                }
+            else:
+                output[key] = value
+        await request.close()
+        response = JSONResponse(output)
+        await response(scope, receive, send)
+
+    return app
+
+
+def test_spool_max_size_file_stays_in_memory(test_client_factory: TestClientFactory) -> None:
+    client = test_client_factory(make_app_spool_size(spool_max_size=1024))
+    content = b"a" * 500
+    response = client.post("/", files={"file": ("test.txt", BytesIO(content), "text/plain")})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["file"]["size"] == 500
+    assert data["file"]["in_memory"] is True
+
+
+def test_spool_max_size_file_rolls_to_disk(test_client_factory: TestClientFactory) -> None:
+    client = test_client_factory(make_app_spool_size(spool_max_size=100))
+    content = b"a" * 500
+    response = client.post("/", files={"file": ("test.txt", BytesIO(content), "text/plain")})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["file"]["size"] == 500
+    assert data["file"]["in_memory"] is False
+
+
+def test_spool_max_size_default_keeps_small_file_in_memory(test_client_factory: TestClientFactory) -> None:
+    async def default_app(scope: Scope, receive: Receive, send: Send) -> None:
+        request = Request(scope, receive)
+        data = await request.form()
+        output: dict[str, Any] = {}
+        for key, value in data.items():
+            if isinstance(value, UploadFile):
+                content = await value.read()
+                output[key] = {
+                    "size": value.size,
+                    "in_memory": value._in_memory,
+                }
+        await request.close()
+        response = JSONResponse(output)
+        await response(scope, receive, send)
+
+    client = test_client_factory(default_app)
+    content = b"a" * 500
+    response = client.post("/", files={"file": ("test.txt", BytesIO(content), "text/plain")})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["file"]["in_memory"] is True

@@ -136,12 +136,14 @@ class MultiPartParser:
         max_files: int | float = 1000,
         max_fields: int | float = 1000,
         max_part_size: int = 1024 * 1024,  # 1MB
+        spool_max_size: int = 1024 * 1024,  # 1MB
     ) -> None:
         assert multipart is not None, "The `python-multipart` library must be installed to use form parsing."
         self.headers = headers
         self.stream = stream
         self.max_files = max_files
         self.max_fields = max_fields
+        self.spool_max_size = spool_max_size
         self.items: list[tuple[str, str | UploadFile]] = []
         self._current_files = 0
         self._current_fields = 0
