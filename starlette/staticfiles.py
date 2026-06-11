@@ -45,6 +45,8 @@ class StaticFiles:
         html: bool = False,
         check_dir: bool = True,
         follow_symlink: bool = False,
+        index_file: str = "index.html",
+        fallback_file: str = "404.html",
     ) -> None:
         self.directory = directory
         self.packages = packages
@@ -52,6 +54,8 @@ class StaticFiles:
         self.html = html
         self.config_checked = False
         self.follow_symlink = follow_symlink
+        self.index_file = index_file
+        self.fallback_file = fallback_file
         if check_dir and directory is not None and not os.path.isdir(directory):
             raise RuntimeError(f"Directory '{directory}' does not exist")
 
@@ -133,8 +137,8 @@ class StaticFiles:
 
         elif stat_result and stat.S_ISDIR(stat_result.st_mode) and self.html:
             # We're in HTML mode, and have got a directory URL.
-            # Check if we have 'index.html' file to serve.
-            index_path = os.path.join(path, "index.html")
+            # Check if we have an index file to serve.
+            index_path = os.path.join(path, self.index_file)
             full_path, stat_result = await anyio.to_thread.run_sync(self.lookup_path, index_path)
             if stat_result is not None and stat.S_ISREG(stat_result.st_mode):
                 if not scope["path"].endswith("/"):
@@ -145,8 +149,8 @@ class StaticFiles:
                 return self.file_response(full_path, stat_result, scope)
 
         if self.html:
-            # Check for '404.html' if we're in HTML mode.
-            full_path, stat_result = await anyio.to_thread.run_sync(self.lookup_path, "404.html")
+            # Check for a fallback file if we're in HTML mode.
+            full_path, stat_result = await anyio.to_thread.run_sync(self.lookup_path, self.fallback_file)
             if stat_result and stat.S_ISREG(stat_result.st_mode):
                 return FileResponse(full_path, stat_result=stat_result, status_code=404)
         raise HTTPException(status_code=404)

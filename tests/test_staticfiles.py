@@ -651,3 +651,99 @@ def test_staticfiles_relative_directory_symlinks(test_client_factory: TestClient
     response = client.get("/example.txt")
     assert response.status_code == 200
     assert response.text == "123\n"
+
+
+def test_staticfiles_html_default_index_and_fallback(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    path = os.path.join(tmpdir, "404.html")
+    with open(path, "w") as file:
+        file.write("<h1>Default not found</h1>")
+    d = os.path.join(tmpdir, "sub")
+    os.mkdir(d)
+    with open(os.path.join(d, "index.html"), "w") as file:
+        file.write("<h1>Default index</h1>")
+
+    app = StaticFiles(directory=tmpdir, html=True)
+    client = test_client_factory(app)
+
+    response = client.get("/sub/")
+    assert response.status_code == 200
+    assert response.text == "<h1>Default index</h1>"
+
+    response = client.get("/sub")
+    assert response.url == "http://testserver/sub/"
+    assert response.status_code == 200
+
+    response = client.get("/nope")
+    assert response.status_code == 404
+    assert response.text == "<h1>Default not found</h1>"
+
+
+def test_staticfiles_html_custom_index_file(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    d = os.path.join(tmpdir, "app")
+    os.mkdir(d)
+    with open(os.path.join(d, "home.html"), "w") as file:
+        file.write("<h1>Custom home</h1>")
+
+    app = StaticFiles(directory=tmpdir, html=True, index_file="home.html")
+    client = test_client_factory(app)
+
+    response = client.get("/app/")
+    assert response.status_code == 200
+    assert response.text == "<h1>Custom home</h1>"
+
+    response = client.get("/app")
+    assert response.url == "http://testserver/app/"
+    assert response.status_code == 200
+    assert response.text == "<h1>Custom home</h1>"
+
+
+def test_staticfiles_html_custom_fallback_file(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    with open(os.path.join(tmpdir, "error.html"), "w") as file:
+        file.write("<h1>Custom error</h1>")
+
+    app = StaticFiles(directory=tmpdir, html=True, fallback_file="error.html")
+    client = test_client_factory(app)
+
+    response = client.get("/does-not-exist")
+    assert response.status_code == 404
+    assert response.text == "<h1>Custom error</h1>"
+
+
+def test_staticfiles_html_custom_index_and_fallback(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    with open(os.path.join(tmpdir, "oops.html"), "w") as file:
+        file.write("<h1>Oops</h1>")
+    d = os.path.join(tmpdir, "docs")
+    os.mkdir(d)
+    with open(os.path.join(d, "app.html"), "w") as file:
+        file.write("<h1>Docs app</h1>")
+
+    app = StaticFiles(directory=tmpdir, html=True, index_file="app.html", fallback_file="oops.html")
+    client = test_client_factory(app)
+
+    response = client.get("/docs/")
+    assert response.status_code == 200
+    assert response.text == "<h1>Docs app</h1>"
+
+    response = client.get("/docs")
+    assert response.url == "http://testserver/docs/"
+    assert response.status_code == 200
+
+    response = client.get("/missing")
+    assert response.status_code == 404
+    assert response.text == "<h1>Oops</h1>"
+
+
+def test_staticfiles_html_custom_index_not_found_falls_back(
+    tmpdir: Path, test_client_factory: TestClientFactory
+) -> None:
+    d = os.path.join(tmpdir, "empty")
+    os.mkdir(d)
+    with open(os.path.join(tmpdir, "404.html"), "w") as file:
+        file.write("<h1>Fallback</h1>")
+
+    app = StaticFiles(directory=tmpdir, html=True, index_file="home.html")
+    client = test_client_factory(app)
+
+    response = client.get("/empty/")
+    assert response.status_code == 404
+    assert response.text == "<h1>Fallback</h1>"
