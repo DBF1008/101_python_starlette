@@ -257,10 +257,12 @@ class Route(BaseRoute):
         seen_params = set(path_params.keys())
         expected_params = set(self.param_convertors.keys())
 
-        if name != self.name or seen_params != expected_params:
+        if name != self.name or not expected_params.issubset(seen_params):
             raise NoMatchFound(name, path_params)
 
-        path, remaining_params = replace_params(self.path_format, self.param_convertors, path_params)
+        path, remaining_params = replace_params(
+            self.path_format, self.param_convertors, {k: path_params[k] for k in expected_params}
+        )
         assert not remaining_params
         return URLPath(path=path, protocol="http")
 
@@ -339,10 +341,12 @@ class WebSocketRoute(BaseRoute):
         seen_params = set(path_params.keys())
         expected_params = set(self.param_convertors.keys())
 
-        if name != self.name or seen_params != expected_params:
+        if name != self.name or not expected_params.issubset(seen_params):
             raise NoMatchFound(name, path_params)
 
-        path, remaining_params = replace_params(self.path_format, self.param_convertors, path_params)
+        path, remaining_params = replace_params(
+            self.path_format, self.param_convertors, {k: path_params[k] for k in expected_params}
+        )
         assert not remaining_params
         return URLPath(path=path, protocol="websocket")
 
@@ -420,8 +424,9 @@ class Mount(BaseRoute):
     def url_path_for(self, name: str, /, **path_params: Any) -> URLPath:
         if self.name is not None and name == self.name and "path" in path_params:
             # 'name' matches "<mount_name>".
-            path_params["path"] = path_params["path"].lstrip("/")
-            path, remaining_params = replace_params(self.path_format, self.param_convertors, path_params)
+            path_params_copy = dict(path_params)
+            path_params_copy["path"] = path_params_copy["path"].lstrip("/")
+            path, remaining_params = replace_params(self.path_format, self.param_convertors, path_params_copy)
             if not remaining_params:
                 return URLPath(path=path)
         elif self.name is None or name.startswith(self.name + ":"):
@@ -432,14 +437,19 @@ class Mount(BaseRoute):
                 # 'name' matches "<mount_name>:<child_name>".
                 remaining_name = name[len(self.name) + 1 :]
             path_kwarg = path_params.get("path")
-            path_params["path"] = ""
-            path_prefix, remaining_params = replace_params(self.path_format, self.param_convertors, path_params)
+            path_params_copy = dict(path_params)
+            path_params_copy["path"] = ""
+            path_prefix, remaining_params = replace_params(self.path_format, self.param_convertors, path_params_copy)
             if path_kwarg is not None:
                 remaining_params["path"] = path_kwarg
             for route in self.routes or []:
                 try:
-                    url = route.url_path_for(remaining_name, **remaining_params)
-                    return URLPath(path=path_prefix.rstrip("/") + str(url), protocol=url.protocol)
+                    url = route.url_path_for(remaining_name, **dict(remaining_params))
+                    return URLPath(
+                        path=path_prefix.rstrip("/") + str(url),
+                        protocol=url.protocol,
+                        host=url.host,
+                    )
                 except NoMatchFound:
                     pass
         raise NoMatchFound(name, path_params)
@@ -485,9 +495,10 @@ class Host(BaseRoute):
 
     def url_path_for(self, name: str, /, **path_params: Any) -> URLPath:
         if self.name is not None and name == self.name and "path" in path_params:
-            # 'name' matches "<mount_name>".
-            path = path_params.pop("path")
-            host, remaining_params = replace_params(self.host_format, self.param_convertors, path_params)
+            # 'name' matches "<host_name>".
+            path = path_params["path"]
+            path_params_copy = {k: v for k, v in path_params.items() if k != "path"}
+            host, remaining_params = replace_params(self.host_format, self.param_convertors, path_params_copy)
             if not remaining_params:
                 return URLPath(path=path, host=host)
         elif self.name is None or name.startswith(self.name + ":"):
@@ -495,12 +506,12 @@ class Host(BaseRoute):
                 # No mount name.
                 remaining_name = name
             else:
-                # 'name' matches "<mount_name>:<child_name>".
+                # 'name' matches "<host_name>:<child_name>".
                 remaining_name = name[len(self.name) + 1 :]
-            host, remaining_params = replace_params(self.host_format, self.param_convertors, path_params)
+            host, remaining_params = replace_params(self.host_format, self.param_convertors, dict(path_params))
             for route in self.routes or []:
                 try:
-                    url = route.url_path_for(remaining_name, **remaining_params)
+                    url = route.url_path_for(remaining_name, **dict(remaining_params))
                     return URLPath(path=str(url), protocol=url.protocol, host=host)
                 except NoMatchFound:
                     pass

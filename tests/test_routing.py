@@ -577,6 +577,327 @@ def test_url_for_with_root_path_ending_with_slash(test_client_factory: TestClien
     assert response.json() == {"index": "https://www.example.org/sub_path/"}
 
 
+async def echo_url_for_nested(request: Request) -> JSONResponse:
+    return JSONResponse(
+        {
+            "index": str(request.url_for("index")),
+            "target": str(request.url_for("target")),
+            "inner_x": str(request.url_for("x")),
+        }
+    )
+
+
+def test_url_for_with_double_mount_and_root_path(test_client_factory: TestClientFactory) -> None:
+    """request.url_for through 2-level nested Mount with root_path."""
+    app = Starlette(
+        routes=[
+            Route("/", echo_url_for_nested, name="index", methods=["GET"]),
+            Mount(
+                "/a",
+                routes=[
+                    Mount(
+                        "/inner",
+                        routes=[
+                            Route("/x", echo_url_for_nested, name="x", methods=["GET"]),
+                        ],
+                    ),
+                    Route("/target", echo_url_for_nested, name="target", methods=["GET"]),
+                ],
+            ),
+        ]
+    )
+
+    client = test_client_factory(app, base_url="https://www.example.org/", root_path="/sub")
+
+    # Access from top-level route
+    response = client.get("/sub/")
+    assert response.json() == {
+        "index": "https://www.example.org/sub/",
+        "target": "https://www.example.org/sub/a/target",
+        "inner_x": "https://www.example.org/sub/a/inner/x",
+    }
+
+    # Access from inside the outer mount
+    response = client.get("/sub/a/target")
+    assert response.json() == {
+        "index": "https://www.example.org/sub/",
+        "target": "https://www.example.org/sub/a/target",
+        "inner_x": "https://www.example.org/sub/a/inner/x",
+    }
+
+    # Access from inside the double mount
+    response = client.get("/sub/a/inner/x")
+    assert response.json() == {
+        "index": "https://www.example.org/sub/",
+        "target": "https://www.example.org/sub/a/target",
+        "inner_x": "https://www.example.org/sub/a/inner/x",
+    }
+
+
+def test_url_for_with_triple_mount() -> None:
+    """Three levels of named nested Mounts should resolve correctly."""
+    app = Starlette(
+        routes=[
+            Mount(
+                "/a",
+                name="a",
+                routes=[
+                    Mount(
+                        "/b",
+                        name="b",
+                        routes=[
+                            Mount("/c", stub_app, name="c"),
+                        ],
+                    ),
+                ],
+            ),
+        ]
+    )
+
+    url = app.url_path_for("a:b:c", path="file.txt")
+    assert url == "/a/b/c/file.txt"
+
+
+def test_url_for_with_triple_mount_and_root_path(test_client_factory: TestClientFactory) -> None:
+    """Three levels of nested Mounts with root_path and request.url_for."""
+
+    def echo(request: Request) -> JSONResponse:
+        return JSONResponse(
+            {
+                "leaf": str(request.url_for("a:b:c_static", path="file.txt")),
+                "echo_url": str(request.url_for("a:b:echo")),
+            }
+        )
+
+    app = Starlette(
+        routes=[
+            Mount(
+                "/a",
+                name="a",
+                routes=[
+                    Mount(
+                        "/b",
+                        name="b",
+                        routes=[
+                            Route("/echo", echo, name="echo"),
+                            Mount("/c", stub_app, name="c_static"),
+                        ],
+                    ),
+                ],
+            ),
+        ]
+    )
+
+    client = test_client_factory(app, base_url="https://www.example.org/", root_path="/proxy")
+    response = client.get("/proxy/a/b/echo")
+    assert response.status_code == 200
+    assert response.json() == {
+        "leaf": "https://www.example.org/proxy/a/b/c/file.txt",
+        "echo_url": "https://www.example.org/proxy/a/b/echo",
+    }
+
+
+def test_url_for_host_with_nested_mount() -> None:
+    """Host containing Mount + sibling Route should resolve correctly."""
+
+    app = Router(
+        [
+            Host(
+                "example.org",
+                name="h",
+                app=Router(
+                    [
+                        Mount(
+                            "/api",
+                            routes=[
+                                Route("/users", users, name="users"),
+                            ],
+                        ),
+                        Route("/home", homepage, name="home"),
+                    ]
+                ),
+            ),
+        ]
+    )
+
+    # Sibling route after Mount inside Host
+    assert app.url_path_for("h:home").make_absolute_url("https://whatever") == "https://example.org/home"
+    # Route inside Mount inside Host
+    assert app.url_path_for("h:users").make_absolute_url("https://whatever") == "https://example.org/api/users"
+
+
+def test_url_for_mount_containing_host() -> None:
+    """Mount containing Host should resolve URL correctly."""
+    inner_app = Router(
+        [
+            Host(
+                "api.example.org",
+                name="api",
+                app=Router(
+                    [
+                        Route("/items", homepage, name="items"),
+                    ]
+                ),
+            ),
+        ]
+    )
+    app = Router([Mount("/v1", app=inner_app)])
+
+    url = app.url_path_for("api:items")
+    assert url.make_absolute_url("https://whatever") == "https://api.example.org/v1/items"
+
+
+def test_url_path_for_does_not_mutate_path_params() -> None:
+    """Verify that url_path_for does not mutate the caller's path_params dict."""
+    app = Router(
+        [
+            Mount(
+                "/a",
+                routes=[
+                    Mount(
+                        "/inner",
+                        routes=[
+                            Route("/x", homepage, name="x"),
+                        ]
+                    ),
+                    Route("/target", homepage, name="target"),
+                ],
+            ),
+        ]
+    )
+
+    # Calling url_path_for should not mutate the original dict
+    params: dict[str, str] = {"path": "/extra"}
+    original_params = dict(params)
+    result = app.url_path_for("target", **params)
+    assert result == "/a/target"
+    assert params == original_params, f"path_params was mutated: {params} != {original_params}"
+
+
+def test_url_for_named_mount_child_miss_does_not_leak_to_sibling() -> None:
+    """When a named inner Mount's children don't match, the sibling Route
+    should still be resolvable even when 'path' is in path_params.
+
+    This is the direct regression test for the dict-mutation bug:
+    the inner Mount's url_path_for used to leak a stale "path" key
+    into remaining_params, causing the sibling Route to fail with
+    NoMatchFound because seen_params != expected_params.
+    """
+    app = Router(
+        [
+            Mount(
+                "/outer",
+                name="outer",
+                routes=[
+                    Mount(
+                        "/inner",
+                        name="inner",
+                        routes=[
+                            Route("/x", homepage, name="x"),
+                        ],
+                    ),
+                    Route("/static", homepage, name="static"),
+                ],
+            ),
+        ]
+    )
+
+    # "outer:static" — the outer Mount strips "outer:", passes "static"
+    # to its children. The inner Mount (named "inner") doesn't match
+    # "static" (no "inner:" prefix), so the sibling Route handles it.
+    url = app.url_path_for("outer:static", path="/file.css")
+    assert url == "/outer/static"
+
+    # Also verify resolution without path param (using full qualified name)
+    url = app.url_path_for("outer:static")
+    assert url == "/outer/static"
+
+    # And verify the inner mount's own child still resolves (fully qualified)
+    url = app.url_path_for("outer:inner:x")
+    assert url == "/outer/inner/x"
+
+
+def test_url_for_unnamed_mount_child_miss_does_not_leak_to_sibling() -> None:
+    """Same as above but with an unnamed inner Mount."""
+    app = Router(
+        [
+            Mount(
+                "/outer",
+                routes=[
+                    Mount(
+                        "/inner",
+                        routes=[
+                            Route("/x", homepage, name="x"),
+                        ],
+                    ),
+                    Route("/static", homepage, name="static"),
+                ],
+            ),
+        ]
+    )
+
+    # The unnamed inner Mount tries to resolve "static" through its
+    # children, fails, and should NOT leak path state to the sibling.
+    url = app.url_path_for("static", path="/file.css")
+    assert url == "/outer/static"
+
+    url = app.url_path_for("static")
+    assert url == "/outer/static"
+
+
+def test_url_for_websocket_with_root_path_and_mount(test_client_factory: TestClientFactory) -> None:
+    """WebSocket url_for with root_path and Mount nesting should produce
+    correct ws:// URLs, and should be consistent with HTTP url_for
+    (same path, scheme derived from connection type)."""
+
+    async def ws_handler(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "ws_url": str(websocket.url_for("ws_endpoint")),
+                "http_url": str(websocket.url_for("http_endpoint")),
+            }
+        )
+        await websocket.close()
+
+    def http_handler(request: Request) -> JSONResponse:
+        return JSONResponse(
+            {
+                "ws_url": str(request.url_for("ws_endpoint")),
+                "http_url": str(request.url_for("http_endpoint")),
+            }
+        )
+
+    app = Starlette(
+        routes=[
+            Route("/http", http_handler, name="http_endpoint", methods=["GET"]),
+            Mount(
+                "/ws-mount",
+                routes=[
+                    WebSocketRoute("/ws", ws_handler, name="ws_endpoint"),
+                ],
+            ),
+        ]
+    )
+
+    client = test_client_factory(app, base_url="https://www.example.org/", root_path="/sub")
+
+    # HTTP request: base_url uses https scheme from TestClient base_url
+    response = client.get("/sub/http")
+    assert response.json() == {
+        "ws_url": "wss://www.example.org/sub/ws-mount/ws",
+        "http_url": "https://www.example.org/sub/http",
+    }
+
+    # WebSocket request: TestClient hardcodes ws://testserver for WebSocket,
+    # so base_url has scheme "ws" and host "testserver".
+    # The PATH portion (root_path + mount + route) must be identical to HTTP.
+    with client.websocket_connect("/sub/ws-mount/ws") as session:
+        data = session.receive_json()
+        assert data["ws_url"] == "ws://testserver/sub/ws-mount/ws"
+        assert data["http_url"] == "http://testserver/sub/http"
+
+
 def test_standalone_route_matches(
     test_client_factory: TestClientFactory,
 ) -> None:
