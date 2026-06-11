@@ -104,20 +104,21 @@ class _CachedRequest(Request):
             return {"type": "http.disconnect"}
         else:
             # body() was never called and stream() wasn't consumed
-            stream = self.stream()
-            try:
-                chunk = await stream.__anext__()
+            message = await self._receive()
+            if message["type"] == "http.request":
+                body = message.get("body", b"")
+                if not message.get("more_body", False):
+                    self._stream_consumed = True
                 self._wrapped_rcv_consumed = self._stream_consumed
                 return {
                     "type": "http.request",
-                    "body": chunk,
+                    "body": body,
                     "more_body": not self._stream_consumed,
                 }
-            except ClientDisconnect:
+            elif message["type"] == "http.disconnect":  # pragma: no branch
+                self._is_disconnected = True
                 self._wrapped_rcv_disconnected = True
                 return {"type": "http.disconnect"}
-            finally:
-                await stream.aclose()
 
 
 class BaseHTTPMiddleware:
