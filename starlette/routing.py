@@ -439,7 +439,7 @@ class Mount(BaseRoute):
             for route in self.routes or []:
                 try:
                     url = route.url_path_for(remaining_name, **remaining_params)
-                    return URLPath(path=path_prefix.rstrip("/") + str(url), protocol=url.protocol)
+                    return URLPath(path=path_prefix.rstrip("/") + str(url), protocol=url.protocol, host=url.host)
                 except NoMatchFound:
                     pass
         raise NoMatchFound(name, path_params)
@@ -479,7 +479,11 @@ class Host(BaseRoute):
                     matched_params[key] = self.param_convertors[key].convert(value)
                 path_params = dict(scope.get("path_params", {}))
                 path_params.update(matched_params)
-                child_scope = {"path_params": path_params, "endpoint": self.app}
+                child_scope = {
+                    "path_params": path_params,
+                    "app_root_path": scope.get("app_root_path", scope.get("root_path", "")),
+                    "endpoint": self.app,
+                }
                 return Match.FULL, child_scope
         return Match.NONE, {}
 

@@ -577,6 +577,169 @@ def test_url_for_with_root_path_ending_with_slash(test_client_factory: TestClien
     assert response.json() == {"index": "https://www.example.org/sub_path/"}
 
 
+def test_url_path_for_host_inside_mount() -> None:
+    app = Router(
+        routes=[
+            Mount(
+                "/api",
+                name="api",
+                routes=[
+                    Host(
+                        "api.example.com",
+                        name="api_host",
+                        app=Router([Route("/users", homepage, name="users")]),
+                    )
+                ],
+            )
+        ]
+    )
+    url = app.url_path_for("api:api_host:users")
+    assert url == "/api/users"
+    assert url.host == "api.example.com"
+    assert url.protocol == "http"
+    absolute = url.make_absolute_url("https://whatever.com")
+    assert absolute == "https://api.example.com/api/users"
+
+
+def test_url_path_for_mount_inside_host() -> None:
+    app = Router(
+        routes=[
+            Host(
+                "api.example.com",
+                name="api",
+                app=Router(
+                    routes=[
+                        Mount(
+                            "/v1",
+                            name="v1",
+                            routes=[Route("/users", homepage, name="users")],
+                        )
+                    ]
+                ),
+            )
+        ]
+    )
+    url = app.url_path_for("api:v1:users")
+    assert url == "/v1/users"
+    assert url.host == "api.example.com"
+    assert url.protocol == "http"
+    absolute = url.make_absolute_url("https://whatever.com")
+    assert absolute == "https://api.example.com/v1/users"
+
+
+def test_url_path_for_websocket_in_nested_mounts() -> None:
+    app = Router(
+        routes=[
+            Mount(
+                "/api",
+                name="api",
+                routes=[
+                    Mount(
+                        "/v1",
+                        name="v1",
+                        routes=[
+                            WebSocketRoute("/ws", websocket_endpoint, name="ws"),
+                            Route("/http", homepage, name="http"),
+                        ],
+                    )
+                ],
+            )
+        ]
+    )
+    ws_url = app.url_path_for("api:v1:ws")
+    assert ws_url == "/api/v1/ws"
+    assert ws_url.protocol == "websocket"
+    assert ws_url.make_absolute_url("https://example.com") == "wss://example.com/api/v1/ws"
+
+    http_url = app.url_path_for("api:v1:http")
+    assert http_url == "/api/v1/http"
+    assert http_url.protocol == "http"
+    assert http_url.make_absolute_url("https://example.com") == "https://example.com/api/v1/http"
+
+
+def test_url_for_with_root_path_and_host(test_client_factory: TestClientFactory) -> None:
+    def endpoint(request: Request) -> JSONResponse:
+        return JSONResponse({"url": str(request.url_for("api:v1:endpoint"))})
+
+    app = Starlette(
+        routes=[
+            Host(
+                "testserver",
+                app=Router(
+                    routes=[
+                        Mount(
+                            "/v1",
+                            name="v1",
+                            routes=[Route("/test", endpoint, name="endpoint")],
+                        )
+                    ]
+                ),
+                name="api",
+            )
+        ]
+    )
+    client = test_client_factory(app, root_path="/root")
+    response = client.get("/root/v1/test")
+    assert response.status_code == 200
+    assert response.json() == {"url": "http://testserver/root/v1/test"}
+
+
+def test_url_for_with_root_path_double_mount(test_client_factory: TestClientFactory) -> None:
+    def endpoint(request: Request) -> JSONResponse:
+        return JSONResponse(
+            {
+                "self_url": str(request.url_for("outer:inner:endpoint")),
+                "root_url": str(request.url_for("root_endpoint")),
+            }
+        )
+
+    def root_handler(request: Request) -> Response:
+        return Response("root")
+
+    app = Starlette(
+        routes=[
+            Route("/", root_handler, name="root_endpoint"),
+            Mount(
+                "/outer",
+                name="outer",
+                routes=[
+                    Mount(
+                        "/inner",
+                        name="inner",
+                        routes=[Route("/test", endpoint, name="endpoint")],
+                    )
+                ],
+            ),
+        ]
+    )
+    client = test_client_factory(app, base_url="https://www.example.org/", root_path="/prefix")
+    response = client.get("/prefix/outer/inner/test")
+    assert response.status_code == 200
+    assert response.json() == {
+        "self_url": "https://www.example.org/prefix/outer/inner/test",
+        "root_url": "https://www.example.org/prefix/",
+    }
+
+
+def test_url_for_cross_nested_routes(test_client_factory: TestClientFactory) -> None:
+    def handler_a(request: Request) -> JSONResponse:
+        return JSONResponse({"url_b": str(request.url_for("mount_b:endpoint_b"))})
+
+    def handler_b(request: Request) -> Response:
+        return Response("B")
+
+    app = Starlette(
+        routes=[
+            Mount("/a", name="mount_a", routes=[Route("/test", handler_a, name="endpoint_a")]),
+            Mount("/b", name="mount_b", routes=[Route("/test", handler_b, name="endpoint_b")]),
+        ]
+    )
+    client = test_client_factory(app, base_url="https://www.example.org/", root_path="/root")
+    response = client.get("/root/a/test")
+    assert response.status_code == 200
+    assert response.json() == {"url_b": "https://www.example.org/root/b/test"}
+
+
 def test_standalone_route_matches(
     test_client_factory: TestClientFactory,
 ) -> None:
