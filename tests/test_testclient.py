@@ -428,3 +428,94 @@ def test_timeout_deprecation() -> None:
     with pytest.deprecated_call(match="You should not use the 'timeout' argument with the TestClient."):
         client = TestClient(mock_service)
         client.get("/", timeout=1)
+
+
+def test_client_address_default() -> None:
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        response = JSONResponse({"host": scope["client"][0], "port": scope["client"][1]})
+        await response(scope, receive, send)
+
+    client = TestClient(app)
+    resp = client.get("/")
+    assert resp.json() == {"host": "testclient", "port": 50000}
+
+
+def test_client_address_custom_default() -> None:
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        response = JSONResponse({"host": scope["client"][0], "port": scope["client"][1]})
+        await response(scope, receive, send)
+
+    client = TestClient(app, client=("10.0.0.1", 9999))
+    resp = client.get("/")
+    assert resp.json() == {"host": "10.0.0.1", "port": 9999}
+
+
+def test_client_address_per_request_override() -> None:
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        response = JSONResponse({"host": scope["client"][0], "port": scope["client"][1]})
+        await response(scope, receive, send)
+
+    client = TestClient(app)
+    resp = client.get("/", client=("192.168.1.1", 12345))
+    assert resp.json() == {"host": "192.168.1.1", "port": 12345}
+
+
+def test_client_address_override_does_not_pollute() -> None:
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        response = JSONResponse({"host": scope["client"][0], "port": scope["client"][1]})
+        await response(scope, receive, send)
+
+    client = TestClient(app)
+    resp1 = client.get("/", client=("10.0.0.1", 8000))
+    assert resp1.json() == {"host": "10.0.0.1", "port": 8000}
+
+    resp2 = client.get("/")
+    assert resp2.json() == {"host": "testclient", "port": 50000}
+
+
+def test_client_address_websocket_override() -> None:
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        ws = WebSocket(scope, receive=receive, send=send)
+        await ws.accept()
+        await ws.send_json({"host": scope["client"][0], "port": scope["client"][1]})
+        await ws.close()
+
+    client = TestClient(app)
+    with client.websocket_connect("/", client=("172.16.0.1", 5555)) as ws:
+        data = ws.receive_json()
+        assert data == {"host": "172.16.0.1", "port": 5555}
+
+
+def test_client_address_websocket_default_fallback() -> None:
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        ws = WebSocket(scope, receive=receive, send=send)
+        await ws.accept()
+        await ws.send_json({"host": scope["client"][0], "port": scope["client"][1]})
+        await ws.close()
+
+    client = TestClient(app)
+    with client.websocket_connect("/") as ws:
+        data = ws.receive_json()
+        assert data == {"host": "testclient", "port": 50000}
+
+
+def test_client_address_http_websocket_alignment() -> None:
+    override = ("10.10.10.10", 7777)
+
+    async def http_app(scope: Scope, receive: Receive, send: Send) -> None:
+        response = JSONResponse(list(scope["client"]))
+        await response(scope, receive, send)
+
+    async def ws_app(scope: Scope, receive: Receive, send: Send) -> None:
+        ws = WebSocket(scope, receive=receive, send=send)
+        await ws.accept()
+        await ws.send_json(list(scope["client"]))
+        await ws.close()
+
+    http_client = TestClient(http_app)
+    ws_client = TestClient(ws_app)
+
+    http_result = http_client.get("/", client=override).json()
+    with ws_client.websocket_connect("/", client=override) as ws:
+        ws_result = ws.receive_json()
+    assert http_result == ws_result == list(override)

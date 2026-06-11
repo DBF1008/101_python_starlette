@@ -223,6 +223,8 @@ class _TestClientTransport(httpx.BaseTransport):
         self.client = client
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        client = request.extensions.get("client", self.client)
+
         scheme = request.url.scheme
         netloc = request.url.netloc.decode(encoding="ascii")
         path = request.url.path
@@ -265,7 +267,7 @@ class _TestClientTransport(httpx.BaseTransport):
                 "scheme": scheme,
                 "query_string": query.encode(),
                 "headers": headers,
-                "client": self.client,
+                "client": client,
                 "server": [host, port],
                 "subprotocols": subprotocols,
                 "state": self.app_state.copy(),
@@ -284,7 +286,7 @@ class _TestClientTransport(httpx.BaseTransport):
             "scheme": scheme,
             "query_string": query.encode(),
             "headers": headers,
-            "client": self.client,
+            "client": client,
             "server": [host, port],
             "extensions": {"http.response.debug": {}},
             "state": self.app_state.copy(),
@@ -442,6 +444,7 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | None = None,
     ) -> httpx.Response:
         if timeout is not httpx.USE_CLIENT_DEFAULT:
             warnings.warn(
@@ -450,6 +453,8 @@ class TestClient(httpx.Client):
                 DeprecationWarning,
                 stacklevel=2,
             )
+        if client is not None:
+            extensions = {**(extensions or {}), "client": client}
         url = self._merge_url(url)
         return super().request(
             method,
@@ -478,7 +483,10 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | None = None,
     ) -> httpx.Response:
+        if client is not None:
+            extensions = {**(extensions or {}), "client": client}
         return super().get(
             url,
             params=params,
@@ -501,7 +509,10 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | None = None,
     ) -> httpx.Response:
+        if client is not None:
+            extensions = {**(extensions or {}), "client": client}
         return super().options(
             url,
             params=params,
@@ -524,7 +535,10 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | None = None,
     ) -> httpx.Response:
+        if client is not None:
+            extensions = {**(extensions or {}), "client": client}
         return super().head(
             url,
             params=params,
@@ -551,7 +565,10 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | None = None,
     ) -> httpx.Response:
+        if client is not None:
+            extensions = {**(extensions or {}), "client": client}
         return super().post(
             url,
             content=content,
@@ -582,7 +599,10 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | None = None,
     ) -> httpx.Response:
+        if client is not None:
+            extensions = {**(extensions or {}), "client": client}
         return super().put(
             url,
             content=content,
@@ -613,7 +633,10 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | None = None,
     ) -> httpx.Response:
+        if client is not None:
+            extensions = {**(extensions or {}), "client": client}
         return super().patch(
             url,
             content=content,
@@ -640,7 +663,10 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | None = None,
     ) -> httpx.Response:
+        if client is not None:
+            extensions = {**(extensions or {}), "client": client}
         return super().delete(
             url,
             params=params,
@@ -656,6 +682,7 @@ class TestClient(httpx.Client):
         self,
         url: str,
         subprotocols: Sequence[str] | None = None,
+        client: tuple[str, int] | None = None,
         **kwargs: Any,
     ) -> WebSocketTestSession:
         url = urljoin("ws://testserver", url)
@@ -666,6 +693,9 @@ class TestClient(httpx.Client):
         if subprotocols is not None:
             headers.setdefault("sec-websocket-protocol", ", ".join(subprotocols))
         kwargs["headers"] = headers
+        if client is not None:
+            extensions = kwargs.get("extensions") or {}
+            kwargs["extensions"] = {**extensions, "client": client}
         try:
             super().request("GET", url, **kwargs)
         except _Upgrade as exc:
