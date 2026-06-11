@@ -651,3 +651,145 @@ def test_staticfiles_relative_directory_symlinks(test_client_factory: TestClient
     response = client.get("/example.txt")
     assert response.status_code == 200
     assert response.text == "123\n"
+
+
+def test_staticfiles_html_head_request(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    path = os.path.join(tmpdir, "dir")
+    os.mkdir(path)
+    with open(os.path.join(path, "index.html"), "w") as file:
+        file.write("<h1>Hello</h1>")
+
+    app = StaticFiles(directory=tmpdir, html=True)
+    client = test_client_factory(app)
+
+    response = client.head("/dir/")
+    assert response.status_code == 200
+    assert response.content == b""
+    assert response.headers["content-length"] == "14"
+
+    response = client.head("/dir")
+    assert response.url == "http://testserver/dir/"
+    assert response.status_code == 200
+    assert response.content == b""
+    assert response.headers["content-length"] == "14"
+
+
+def test_staticfiles_html_conditional_request(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    path = os.path.join(tmpdir, "dir")
+    os.mkdir(path)
+    with open(os.path.join(path, "index.html"), "w") as file:
+        file.write("<h1>Hello</h1>")
+
+    app = StaticFiles(directory=tmpdir, html=True)
+    client = test_client_factory(app)
+
+    first = client.get("/dir/")
+    assert first.status_code == 200
+    etag = first.headers["etag"]
+    last_modified = first.headers["last-modified"]
+
+    resp_etag = client.get("/dir/", headers={"if-none-match": etag})
+    assert resp_etag.status_code == 304
+    assert resp_etag.content == b""
+    assert resp_etag.headers["etag"] == etag
+    assert resp_etag.headers["last-modified"] == last_modified
+
+    resp_lm = client.get("/dir/", headers={"if-modified-since": last_modified})
+    assert resp_lm.status_code == 304
+    assert resp_lm.content == b""
+
+
+def test_staticfiles_html_head_conditional_request(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    path = os.path.join(tmpdir, "dir")
+    os.mkdir(path)
+    with open(os.path.join(path, "index.html"), "w") as file:
+        file.write("<h1>Hello</h1>")
+
+    app = StaticFiles(directory=tmpdir, html=True)
+    client = test_client_factory(app)
+
+    first = client.get("/dir/")
+    assert first.status_code == 200
+    etag = first.headers["etag"]
+    last_modified = first.headers["last-modified"]
+
+    resp = client.head("/dir/", headers={"if-none-match": etag})
+    assert resp.status_code == 304
+    assert resp.content == b""
+    assert resp.headers["etag"] == etag
+    assert resp.headers["last-modified"] == last_modified
+
+
+def test_staticfiles_html_get_head_headers_alignment(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    path = os.path.join(tmpdir, "dir")
+    os.mkdir(path)
+    with open(os.path.join(path, "index.html"), "w") as file:
+        file.write("<h1>Hello</h1>")
+
+    app = StaticFiles(directory=tmpdir, html=True)
+    client = test_client_factory(app)
+
+    get_resp = client.get("/dir/")
+    head_resp = client.head("/dir/")
+
+    assert get_resp.status_code == head_resp.status_code == 200
+    assert get_resp.headers["etag"] == head_resp.headers["etag"]
+    assert get_resp.headers["last-modified"] == head_resp.headers["last-modified"]
+    assert get_resp.headers["content-length"] == head_resp.headers["content-length"]
+    assert get_resp.headers["content-type"] == head_resp.headers["content-type"]
+
+
+def test_staticfiles_304_with_star_etag(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    path = os.path.join(tmpdir, "example.txt")
+    with open(path, "w") as file:
+        file.write("<file content>")
+
+    app = StaticFiles(directory=tmpdir)
+    client = test_client_factory(app)
+
+    first = client.get("/example.txt")
+    assert first.status_code == 200
+
+    resp = client.get("/example.txt", headers={"if-none-match": "*"})
+    assert resp.status_code == 304
+    assert resp.content == b""
+
+
+def test_staticfiles_html_404_conditional_request(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    path_404 = os.path.join(tmpdir, "404.html")
+    with open(path_404, "w") as file:
+        file.write("<h1>Not Found</h1>")
+
+    common_modified_time = time.mktime(time.strptime("2013-10-10 23:40:00", "%Y-%m-%d %H:%M:%S"))
+    os.utime(path_404, (common_modified_time, common_modified_time))
+
+    app = StaticFiles(directory=tmpdir, html=True)
+    client = test_client_factory(app)
+
+    first = client.get("/missing")
+    assert first.status_code == 404
+    assert first.text == "<h1>Not Found</h1>"
+
+    resp = client.get("/missing", headers={"if-modified-since": first.headers["last-modified"]})
+    assert resp.status_code == 404
+    assert resp.text == "<h1>Not Found</h1>"
+
+
+def test_staticfiles_304_includes_last_modified(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    path = os.path.join(tmpdir, "example.txt")
+    with open(path, "w") as file:
+        file.write("<file content>")
+
+    app = StaticFiles(directory=tmpdir)
+    client = test_client_factory(app)
+
+    first = client.get("/example.txt")
+    assert first.status_code == 200
+    etag = first.headers["etag"]
+    last_modified = first.headers["last-modified"]
+
+    second = client.get("/example.txt", headers={"if-none-match": etag})
+    assert second.status_code == 304
+    assert "last-modified" in second.headers
+    assert second.headers["last-modified"] == last_modified
+    assert second.headers["etag"] == etag
