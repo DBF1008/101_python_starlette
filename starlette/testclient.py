@@ -59,6 +59,8 @@ ASGI3App = Callable[[Scope, Receive, Send], Awaitable[None]]
 
 _RequestData = Mapping[str, str | Iterable[str] | bytes]
 
+_UNSET: Any = object()  # Sentinel to distinguish "not provided" from None
+
 
 def _is_asgi3(app: ASGI2App | ASGI3App) -> TypeGuard[ASGI3App]:
     if inspect.isclass(app):
@@ -265,7 +267,7 @@ class _TestClientTransport(httpx.BaseTransport):
                 "scheme": scheme,
                 "query_string": query.encode(),
                 "headers": headers,
-                "client": self.client,
+                "client": request.extensions.get("starlette.testclient.client", self.client),
                 "server": [host, port],
                 "subprotocols": subprotocols,
                 "state": self.app_state.copy(),
@@ -284,7 +286,7 @@ class _TestClientTransport(httpx.BaseTransport):
             "scheme": scheme,
             "query_string": query.encode(),
             "headers": headers,
-            "client": self.client,
+            "client": request.extensions.get("starlette.testclient.client", self.client),
             "server": [host, port],
             "extensions": {"http.response.debug": {}},
             "state": self.app_state.copy(),
@@ -442,6 +444,7 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | Any = _UNSET,
     ) -> httpx.Response:
         if timeout is not httpx.USE_CLIENT_DEFAULT:
             warnings.warn(
@@ -450,6 +453,10 @@ class TestClient(httpx.Client):
                 DeprecationWarning,
                 stacklevel=2,
             )
+        if client is not _UNSET:
+            if extensions is None:
+                extensions = {}
+            extensions["starlette.testclient.client"] = client
         url = self._merge_url(url)
         return super().request(
             method,
@@ -478,7 +485,12 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | Any = _UNSET,
     ) -> httpx.Response:
+        if client is not _UNSET:
+            if extensions is None:
+                extensions = {}
+            extensions["starlette.testclient.client"] = client
         return super().get(
             url,
             params=params,
@@ -501,7 +513,12 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | Any = _UNSET,
     ) -> httpx.Response:
+        if client is not _UNSET:
+            if extensions is None:
+                extensions = {}
+            extensions["starlette.testclient.client"] = client
         return super().options(
             url,
             params=params,
@@ -524,7 +541,12 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | Any = _UNSET,
     ) -> httpx.Response:
+        if client is not _UNSET:
+            if extensions is None:
+                extensions = {}
+            extensions["starlette.testclient.client"] = client
         return super().head(
             url,
             params=params,
@@ -551,7 +573,12 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | Any = _UNSET,
     ) -> httpx.Response:
+        if client is not _UNSET:
+            if extensions is None:
+                extensions = {}
+            extensions["starlette.testclient.client"] = client
         return super().post(
             url,
             content=content,
@@ -582,7 +609,12 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | Any = _UNSET,
     ) -> httpx.Response:
+        if client is not _UNSET:
+            if extensions is None:
+                extensions = {}
+            extensions["starlette.testclient.client"] = client
         return super().put(
             url,
             content=content,
@@ -613,7 +645,12 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | Any = _UNSET,
     ) -> httpx.Response:
+        if client is not _UNSET:
+            if extensions is None:
+                extensions = {}
+            extensions["starlette.testclient.client"] = client
         return super().patch(
             url,
             content=content,
@@ -640,7 +677,12 @@ class TestClient(httpx.Client):
         follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
         extensions: dict[str, Any] | None = None,
+        client: tuple[str, int] | Any = _UNSET,
     ) -> httpx.Response:
+        if client is not _UNSET:
+            if extensions is None:
+                extensions = {}
+            extensions["starlette.testclient.client"] = client
         return super().delete(
             url,
             params=params,
@@ -656,6 +698,8 @@ class TestClient(httpx.Client):
         self,
         url: str,
         subprotocols: Sequence[str] | None = None,
+        *,
+        client: tuple[str, int] | Any = _UNSET,
         **kwargs: Any,
     ) -> WebSocketTestSession:
         url = urljoin("ws://testserver", url)
@@ -666,6 +710,12 @@ class TestClient(httpx.Client):
         if subprotocols is not None:
             headers.setdefault("sec-websocket-protocol", ", ".join(subprotocols))
         kwargs["headers"] = headers
+        if client is not _UNSET:
+            extensions = kwargs.get("extensions")
+            if extensions is None:
+                extensions = {}
+            extensions["starlette.testclient.client"] = client
+            kwargs["extensions"] = extensions
         try:
             super().request("GET", url, **kwargs)
         except _Upgrade as exc:

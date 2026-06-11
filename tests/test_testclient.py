@@ -428,3 +428,98 @@ def test_timeout_deprecation() -> None:
     with pytest.deprecated_call(match="You should not use the 'timeout' argument with the TestClient."):
         client = TestClient(mock_service)
         client.get("/", timeout=1)
+
+
+def test_client_per_request_override(test_client_factory: TestClientFactory) -> None:
+    """Per-request client override: default → override → default (no pollution)."""
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        client = scope.get("client")
+        assert client is not None
+        host, port = client
+        response = JSONResponse({"host": host, "port": port})
+        await response(scope, receive, send)
+
+    client = test_client_factory(app)
+
+    # Default client from TestClient
+    response = client.get("/")
+    assert response.json() == {"host": "testclient", "port": 50000}
+
+    # Per-request override via request()
+    response = client.request("GET", "/", client=("10.0.0.1", 8080))
+    assert response.json() == {"host": "10.0.0.1", "port": 8080}
+
+    # No pollution — back to default
+    response = client.get("/")
+    assert response.json() == {"host": "testclient", "port": 50000}
+
+
+def test_client_per_request_override_shortcuts(test_client_factory: TestClientFactory) -> None:
+    """All HTTP shortcut methods support per-request client override."""
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        client = scope.get("client")
+        assert client is not None
+        host, port = client
+        response = JSONResponse({"host": host, "port": port})
+        await response(scope, receive, send)
+
+    client = test_client_factory(app)
+
+    for method in ("get", "options", "head", "post", "put", "patch", "delete"):
+        response = getattr(client, method)("/", client=("1.2.3.4", 9999))
+        assert response.status_code == 200, f"Failed status for .{method}()"
+        # HEAD returns no body by HTTP spec, so skip JSON assertion
+        if method != "head":
+            assert response.json() == {"host": "1.2.3.4", "port": 9999}, f"Failed body for .{method}()"
+
+    # Confirm default is intact after all shortcut overrides
+    response = client.get("/")
+    assert response.json() == {"host": "testclient", "port": 50000}
+
+
+def test_client_websocket_per_request_override(test_client_factory: TestClientFactory) -> None:
+    """WebSocket connections support per-request client override, aligned with HTTP."""
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        assert scope["type"] == "websocket"
+        client = scope.get("client")
+        assert client is not None
+        host, port = client
+        websocket = WebSocket(scope, receive=receive, send=send)
+        await websocket.accept()
+        await websocket.send_json({"host": host, "port": port})
+
+    client = test_client_factory(app)
+
+    # Default WebSocket client
+    with client.websocket_connect("/") as ws:
+        assert ws.receive_json() == {"host": "testclient", "port": 50000}
+
+    # Per-request override
+    with client.websocket_connect("/", client=("172.16.0.1", 12345)) as ws:
+        assert ws.receive_json() == {"host": "172.16.0.1", "port": 12345}
+
+    # No pollution — back to default
+    with client.websocket_connect("/") as ws:
+        assert ws.receive_json() == {"host": "testclient", "port": 50000}
+
+
+def test_client_per_request_override_none(test_client_factory: TestClientFactory) -> None:
+    """Explicitly passing client=None sets scope client to None."""
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        client = scope.get("client")
+        response = JSONResponse({"client": client})
+        await response(scope, receive, send)
+
+    client = test_client_factory(app)
+
+    # Explicit None overrides the default
+    response = client.get("/", client=None)
+    assert response.json() == {"client": None}
+
+    # Default is intact afterwards
+    response = client.get("/")
+    assert response.json() == {"client": ["testclient", 50000]}
