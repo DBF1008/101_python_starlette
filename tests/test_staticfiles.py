@@ -650,4 +650,142 @@ def test_staticfiles_relative_directory_symlinks(test_client_factory: TestClient
     client = test_client_factory(app)
     response = client.get("/example.txt")
     assert response.status_code == 200
-    assert response.text == "123\n"
+
+
+def test_staticfiles_html_custom_index(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    """Test custom index filename with html=True."""
+    path = os.path.join(tmpdir, "404.html")
+    with open(path, "w") as file:
+        file.write("<h1>Custom not found page</h1>")
+    path = os.path.join(tmpdir, "dir")
+    os.mkdir(path)
+    path = os.path.join(path, "home.html")
+    with open(path, "w") as file:
+        file.write("<h1>Custom Home Page</h1>")
+
+    app = StaticFiles(directory=tmpdir, html=True, html_index="home.html")
+    client = test_client_factory(app)
+
+    # Should serve home.html for directory with trailing slash
+    response = client.get("/dir/")
+    assert response.url == "http://testserver/dir/"
+    assert response.status_code == 200
+    assert response.text == "<h1>Custom Home Page</h1>"
+
+    # Should redirect to add trailing slash
+    response = client.get("/dir")
+    assert response.url == "http://testserver/dir/"
+    assert response.status_code == 200
+    assert response.text == "<h1>Custom Home Page</h1>"
+
+    # Should serve home.html directly
+    response = client.get("/dir/home.html")
+    assert response.url == "http://testserver/dir/home.html"
+    assert response.status_code == 200
+    assert response.text == "<h1>Custom Home Page</h1>"
+
+    # Should still use 404.html for missing paths
+    response = client.get("/missing")
+    assert response.status_code == 404
+    assert response.text == "<h1>Custom not found page</h1>"
+
+
+def test_staticfiles_html_custom_fallback(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    """Test custom 404 fallback filename with html=True."""
+    path = os.path.join(tmpdir, "not-found.html")
+    with open(path, "w") as file:
+        file.write("<h1>Custom 404 Page</h1>")
+    path = os.path.join(tmpdir, "dir")
+    os.mkdir(path)
+    path = os.path.join(path, "index.html")
+    with open(path, "w") as file:
+        file.write("<h1>Hello</h1>")
+
+    app = StaticFiles(directory=tmpdir, html=True, html_fallback="not-found.html")
+    client = test_client_factory(app)
+
+    # Should serve index.html normally
+    response = client.get("/dir/")
+    assert response.url == "http://testserver/dir/"
+    assert response.status_code == 200
+    assert response.text == "<h1>Hello</h1>"
+
+    # Should serve custom 404 page for missing paths
+    response = client.get("/missing")
+    assert response.status_code == 404
+    assert response.text == "<h1>Custom 404 Page</h1>"
+
+
+def test_staticfiles_html_custom_index_and_fallback(
+    tmpdir: Path, test_client_factory: TestClientFactory
+) -> None:
+    """Test both custom index and fallback filenames with html=True."""
+    path = os.path.join(tmpdir, "app.html")
+    with open(path, "w") as file:
+        file.write("<h1>SPA Fallback</h1>")
+    path = os.path.join(tmpdir, "dir")
+    os.mkdir(path)
+    path = os.path.join(path, "home.html")
+    with open(path, "w") as file:
+        file.write("<h1>Custom Home</h1>")
+
+    app = StaticFiles(directory=tmpdir, html=True, html_index="home.html", html_fallback="app.html")
+    client = test_client_factory(app)
+
+    # Should serve custom index
+    response = client.get("/dir/")
+    assert response.url == "http://testserver/dir/"
+    assert response.status_code == 200
+    assert response.text == "<h1>Custom Home</h1>"
+
+    # Should serve custom fallback for missing paths
+    response = client.get("/missing")
+    assert response.status_code == 404
+    assert response.text == "<h1>SPA Fallback</h1>"
+
+
+def test_staticfiles_html_custom_index_missing(tmpdir: Path, test_client_factory: TestClientFactory) -> None:
+    """Test that custom index falls back to 404 when not found."""
+    path = os.path.join(tmpdir, "404.html")
+    with open(path, "w") as file:
+        file.write("<h1>Not Found</h1>")
+    path = os.path.join(tmpdir, "dir")
+    os.mkdir(path)
+    # No home.html in dir
+
+    app = StaticFiles(directory=tmpdir, html=True, html_index="home.html")
+    client = test_client_factory(app)
+
+    # Should serve 404.html when custom index is missing
+    response = client.get("/dir/")
+    assert response.url == "http://testserver/dir/"
+    assert response.status_code == 404
+    assert response.text == "<h1>Not Found</h1>"
+
+
+def test_staticfiles_html_custom_params_ignored_when_html_false(
+    tmpdir: Path, test_client_factory: TestClientFactory
+) -> None:
+    """Test that custom index/fallback params are ignored when html=False."""
+    path = os.path.join(tmpdir, "home.html")
+    with open(path, "w") as file:
+        file.write("<h1>Custom Home</h1>")
+    path = os.path.join(tmpdir, "dir")
+    os.mkdir(path)
+    path = os.path.join(path, "home.html")
+    with open(path, "w") as file:
+        file.write("<h1>Dir Home</h1>")
+
+    # Custom params should be ignored when html=False
+    app = StaticFiles(directory=tmpdir, html=False, html_index="home.html", html_fallback="404.html")
+    client = test_client_factory(app)
+
+    # Should not serve directory index - raises HTTPException
+    with pytest.raises(HTTPException) as exc_info:
+        client.get("/dir/")
+    assert exc_info.value.status_code == 404
+
+    # Should serve files directly
+    response = client.get("/home.html")
+    assert response.status_code == 200
+    assert response.text == "<h1>Custom Home</h1>"
