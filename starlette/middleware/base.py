@@ -17,80 +17,160 @@ AsyncContentStream = AsyncIterable[str | bytes | memoryview | MutableMapping[str
 T = TypeVar("T")
 
 
+class _CachedRequestStream:
+    """Non-generator async iterator for _CachedRequest.stream().
+
+    Using a class instead of an async generator avoids PytestUnraisableExceptionWarning
+    when consumers break out of iteration without explicitly closing the stream.
+    """
+
+    __slots__ = ("_request", "_replay_index", "_replaying")
+
+    def __init__(self, request: _CachedRequest) -> None:
+        self._request = request
+        self._replay_index = 0
+        # If _body is set and stream is exhausted, we'll replay from cache.
+        self._replaying = hasattr(request, "_body") and request._rcv_stream_exhausted
+
+    def __aiter__(self) -> _CachedRequestStream:
+        return self
+
+    async def __anext__(self) -> bytes:
+        request = self._request
+        if self._replaying:
+            # Replay mode: yield _body then sentinel
+            if self._replay_index == 0:
+                self._replay_index = 1
+                return request._body
+            elif self._replay_index == 1:
+                self._replay_index = 2
+                return b""
+            else:
+                raise StopAsyncIteration
+        # Replay already-recorded chunks from previous stream() calls
+        if self._replay_index < len(request._rcv_chunks):
+            chunk = request._rcv_chunks[self._replay_index]
+            self._replay_index += 1
+            return chunk
+        # Then read new chunks from the ASGI channel
+        if not request._rcv_stream_exhausted:
+            chunk = await request._read_next_chunk()
+            if chunk is not None:
+                # _read_next_chunk appended to _rcv_chunks; advance past it
+                self._replay_index = len(request._rcv_chunks)
+                return chunk
+        raise StopAsyncIteration
+
+
 class _CachedRequest(Request):
     """
-    If the user calls Request.body() from their dispatch function
-    we cache the entire request body in memory and pass that to downstream middlewares,
-    but if they call Request.stream() then all we do is send an
-    empty body so that downstream things don't hang forever.
+    Wraps the request so that the body is always available to the downstream
+    app, regardless of how the middleware consumed it (body(), stream(), or
+    form()).
+
+    The stream() override records every chunk into _body as it is consumed.
+    A drain step in BaseHTTPMiddleware's call_next() ensures the stream is
+    fully consumed and _body is complete before the inner app starts.
+
+    wrapped_receive() then replays _body as a single http.request message,
+    giving the downstream app a consistent, complete view of the request body.
     """
 
     def __init__(self, scope: Scope, receive: Receive):
         super().__init__(scope, receive)
         self._wrapped_rcv_disconnected = False
         self._wrapped_rcv_consumed = False
-        self._wrapped_rc_stream = self.stream()
+        self._rcv_chunks: list[bytes] = []
+        self._rcv_stream_gen: AsyncGenerator[bytes, None] | None = None
+        self._rcv_stream_exhausted = False
+
+    async def _read_next_chunk(self) -> bytes | None:
+        """Read the next chunk from the ASGI receive channel, recording it.
+        Returns None when the stream is fully exhausted."""
+        if self._rcv_stream_exhausted:
+            return None
+        if self._rcv_stream_gen is None:
+            self._rcv_stream_gen = super().stream()
+        try:
+            chunk = await self._rcv_stream_gen.__anext__()
+        except StopAsyncIteration:
+            self._rcv_stream_exhausted = True
+            await self._rcv_stream_gen.aclose()
+            return None
+        # Record all chunks (including the b"" sentinel from base stream)
+        self._rcv_chunks.append(chunk)
+        self._body = b"".join(self._rcv_chunks)
+        return chunk
+
+    async def _close_stream_gen(self) -> None:
+        if self._rcv_stream_gen is not None and not self._rcv_stream_exhausted:
+            await self._rcv_stream_gen.aclose()
+            self._rcv_stream_exhausted = True
+
+    def stream(self) -> _CachedRequestStream:
+        """Return a non-generator async iterator to avoid GC cleanup warnings."""
+        return _CachedRequestStream(self)
 
     async def wrapped_receive(self) -> Message:
-        # wrapped_rcv state 1: disconnected
+        # State 1: we've already forwarded a disconnect to the downstream app.
         if self._wrapped_rcv_disconnected:
-            # we've already sent a disconnect to the downstream app
-            # we don't need to wait to get another one
-            # (although most ASGI servers will just keep sending it)
             return {"type": "http.disconnect"}
-        # wrapped_rcv state 1: consumed but not yet disconnected
+
+        # State 2: body has been fully replayed; now forward disconnect.
         if self._wrapped_rcv_consumed:
-            # since the downstream app has consumed us all that is left
-            # is to send it a disconnect
-            if self._is_disconnected:
-                # the middleware has already seen the disconnect
-                # since we know the client is disconnected no need to wait
-                # for the message
+            if not self._is_disconnected:
+                msg = await self.receive()
+                if msg["type"] != "http.disconnect":  # pragma: no cover
+                    raise RuntimeError(f"Unexpected message received: {msg['type']}")
+            self._wrapped_rcv_disconnected = True
+            return {"type": "http.disconnect"}
+
+        # State 3: client disconnected — if there's a partial body, replay it
+        # first (the disconnect will follow on the next receive call).
+        # If no body was read at all, return disconnect immediately.
+        if self._is_disconnected:
+            if not hasattr(self, "_body") or self._body == b"":
                 self._wrapped_rcv_disconnected = True
                 return {"type": "http.disconnect"}
-            # we don't know yet if the client is disconnected or not
-            # so we'll wait until we get that message
-            msg = await self.receive()
-            if msg["type"] != "http.disconnect":  # pragma: no cover
-                # at this point a disconnect is all that we should be receiving
-                # if we get something else, things went wrong somewhere
-                raise RuntimeError(f"Unexpected message received: {msg['type']}")
-            self._wrapped_rcv_disconnected = True
-            return msg
-
-        # wrapped_rcv state 3: not yet consumed
-        if getattr(self, "_body", None) is not None:
-            # body() was called, we return it even if the client disconnected
+            # Partial body available — replay it, then disconnect will follow.
             self._wrapped_rcv_consumed = True
             return {
                 "type": "http.request",
                 "body": self._body,
                 "more_body": False,
             }
-        elif self._stream_consumed:
-            # stream() was called to completion
-            # return an empty body so that downstream apps don't hang
-            # waiting for a disconnect
+
+        # State 4: replay the buffered body as a single message.
+        if hasattr(self, "_body"):
             self._wrapped_rcv_consumed = True
             return {
                 "type": "http.request",
-                "body": b"",
+                "body": self._body,
                 "more_body": False,
             }
-        else:
-            # body() was never called and stream() wasn't consumed
-            try:
-                stream = self.stream()
-                chunk = await stream.__anext__()
-                self._wrapped_rcv_consumed = self._stream_consumed
+
+        # State 5: stream not yet fully consumed — pull the next chunk.
+        # This path is only reached if call_next's drain hasn't run yet
+        # (e.g. interleaved stream/call_next usage).
+        try:
+            chunk = await self._read_next_chunk()
+            if chunk is None:
+                # Stream exhausted, no body was read
+                self._wrapped_rcv_consumed = True
                 return {
                     "type": "http.request",
-                    "body": chunk,
-                    "more_body": not self._stream_consumed,
+                    "body": b"",
+                    "more_body": False,
                 }
-            except ClientDisconnect:
-                self._wrapped_rcv_disconnected = True
-                return {"type": "http.disconnect"}
+            self._wrapped_rcv_consumed = self._rcv_stream_exhausted
+            return {
+                "type": "http.request",
+                "body": chunk,
+                "more_body": not self._rcv_stream_exhausted,
+            }
+        except ClientDisconnect:
+            self._wrapped_rcv_disconnected = True
+            return {"type": "http.disconnect"}
 
 
 class BaseHTTPMiddleware:
@@ -110,6 +190,20 @@ class BaseHTTPMiddleware:
         exception_already_raised = False
 
         async def call_next(request: Request) -> Response:
+            # Ensure the full request body is buffered for downstream replay.
+            # This guarantees consistent behavior regardless of whether the
+            # middleware consumed the body via body(), stream(), or form().
+            if not request._rcv_stream_exhausted:
+                try:
+                    while not request._rcv_stream_exhausted:
+                        await request._read_next_chunk()
+                except ClientDisconnect:
+                    request._is_disconnected = True
+                finally:
+                    # Close the base stream generator to avoid GC warnings
+                    if request._rcv_stream_gen is not None:
+                        await request._rcv_stream_gen.aclose()
+
             async def receive_or_disconnect() -> Message:
                 if response_sent.is_set():
                     return {"type": "http.disconnect"}

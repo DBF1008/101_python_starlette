@@ -299,15 +299,17 @@ async def test_run_background_tasks_even_if_client_disconnects() -> None:
         "path": "/",
     }
 
-    async def receive() -> Message:
-        raise NotImplementedError("Should not be called!")
+    async def receive() -> AsyncIterator[Message]:
+        yield {"type": "http.request", "body": b"", "more_body": False}
 
     async def send(message: Message) -> None:
         if message["type"] == "http.response.body":
             if not message.get("more_body", False):  # pragma: no branch
                 response_complete.set()
 
-    await app(scope, receive, send)
+    rcv = receive()
+    await app(scope, rcv.__anext__, send)
+    await rcv.aclose()
 
     assert background_task_run.is_set()
 
@@ -384,8 +386,8 @@ async def test_do_not_block_on_background_tasks() -> None:
         "path": "/",
     }
 
-    async def receive() -> Message:
-        raise NotImplementedError("Should not be called!")
+    async def receive() -> AsyncIterator[Message]:
+        yield {"type": "http.request", "body": b"", "more_body": False}
 
     async def send(message: Message) -> None:
         if message["type"] == "http.response.body":
@@ -393,9 +395,13 @@ async def test_do_not_block_on_background_tasks() -> None:
             if not message.get("more_body", False):
                 response_complete.set()
 
+    rcv1 = receive()
+    rcv2 = receive()
     async with anyio.create_task_group() as tg:
-        tg.start_soon(app, scope, receive, send)
-        tg.start_soon(app, scope, receive, send)
+        tg.start_soon(app, scope, rcv1.__anext__, send)
+        tg.start_soon(app, scope, rcv2.__anext__, send)
+    await rcv1.aclose()
+    await rcv2.aclose()
 
     # Without the fix, the background tasks would start and finish before the
     # last http.response.body is sent.
@@ -457,15 +463,17 @@ async def test_run_context_manager_exit_even_if_client_disconnects() -> None:
         "path": "/",
     }
 
-    async def receive() -> Message:
-        raise NotImplementedError("Should not be called!")
+    async def receive() -> AsyncIterator[Message]:
+        yield {"type": "http.request", "body": b"", "more_body": False}
 
     async def send(message: Message) -> None:
         if message["type"] == "http.response.body":
             if not message.get("more_body", False):  # pragma: no branch
                 response_complete.set()
 
-    await app(scope, receive, send)
+    rcv = receive()
+    await app(scope, rcv.__anext__, send)
+    await rcv.aclose()
 
     assert context_manager_exited.is_set()
 
@@ -600,7 +608,7 @@ def test_read_request_stream_in_app_after_middleware_calls_stream(
     test_client_factory: TestClientFactory,
 ) -> None:
     async def homepage(request: Request) -> PlainTextResponse:
-        expected = [b""]
+        expected = [b"a", b""]
         async for chunk in request.stream():
             assert chunk == expected.pop(0)
         assert expected == []
@@ -661,7 +669,7 @@ def test_read_request_body_in_app_after_middleware_calls_stream(
     test_client_factory: TestClientFactory,
 ) -> None:
     async def homepage(request: Request) -> PlainTextResponse:
-        assert await request.body() == b""
+        assert await request.body() == b"a"
         return PlainTextResponse("Homepage")
 
     class ConsumingMiddleware(BaseHTTPMiddleware):
@@ -729,9 +737,12 @@ def test_read_request_stream_in_dispatch_after_app_calls_stream(
             call_next: RequestResponseEndpoint,
         ) -> Response:
             resp = await call_next(request)
-            with pytest.raises(RuntimeError, match="Stream consumed"):
-                async for _ in request.stream():
-                    raise AssertionError("should not be called")  # pragma: no cover
+            # After call_next, the body is cached in _body and can be
+            # replayed via stream() — no longer raises "Stream consumed".
+            expected = [b"a", b""]
+            async for chunk in request.stream():
+                assert chunk == expected.pop(0)
+            assert expected == []
             return resp
 
     app = Starlette(
@@ -758,9 +769,12 @@ def test_read_request_stream_in_dispatch_after_app_calls_body(
             call_next: RequestResponseEndpoint,
         ) -> Response:
             resp = await call_next(request)
-            with pytest.raises(RuntimeError, match="Stream consumed"):
-                async for _ in request.stream():
-                    raise AssertionError("should not be called")  # pragma: no cover
+            # After call_next, the body is cached in _body and can be
+            # replayed via stream() — no longer raises "Stream consumed".
+            expected = [b"a", b""]
+            async for chunk in request.stream():
+                assert chunk == expected.pop(0)
+            assert expected == []
             return resp
 
     app = Starlette(
@@ -775,11 +789,15 @@ def test_read_request_stream_in_dispatch_after_app_calls_body(
 
 @pytest.mark.anyio
 async def test_read_request_stream_in_dispatch_wrapping_app_calls_body() -> None:
+    """When middleware interleaves stream() reads with call_next,
+    call_next drains the remaining stream so the endpoint gets the full body.
+    The middleware's stream iteration ends after call_next since the stream
+    has been fully consumed by the drain."""
+
     async def endpoint(scope: Scope, receive: Receive, send: Send) -> None:
         request = Request(scope, receive)
-        async for chunk in request.stream():  # pragma: no branch
-            assert chunk == b"2"
-            break
+        body = await request.body()
+        assert body == b"123"
         await Response()(scope, receive, send)
 
     class ConsumingMiddleware(BaseHTTPMiddleware):
@@ -788,15 +806,15 @@ async def test_read_request_stream_in_dispatch_wrapping_app_calls_body() -> None
             request: Request,
             call_next: RequestResponseEndpoint,
         ) -> Response:
-            expected = b"1"
-            response: Response | None = None
+            # Read first chunk
+            first_chunk: bytes = b""
             async for chunk in request.stream():  # pragma: no branch
-                assert chunk == expected
-                if expected == b"1":
-                    response = await call_next(request)
-                    expected = b"3"
-                else:
-                    break
+                first_chunk = chunk
+                break
+            assert first_chunk == b"1"
+            # call_next drains the remaining stream (b"2" + b"3")
+            response = await call_next(request)
+            # Stream is now exhausted; async for loop ends naturally
             assert response is not None
             return response
 
@@ -1115,7 +1133,9 @@ async def test_multiple_middlewares_stacked_client_disconnected() -> None:
     async def send(message: Message) -> None:
         sent.append(message)
 
-    await app(scope, receive().__anext__, send)
+    rcv = receive()
+    await app(scope, rcv.__anext__, send)
+    await rcv.aclose()
 
     assert ordered_events == [
         "1:STARTED",
@@ -1202,7 +1222,9 @@ async def test_poll_for_disconnect_repeated(send_body: bool) -> None:
     async def send(message: Message) -> None:
         sent.append(message)
 
-    await app(scope, receive().__anext__, send)
+    rcv = receive()
+    await app(scope, rcv.__anext__, send)
+    await rcv.aclose()
 
     assert sent == [
         {
@@ -1244,15 +1266,17 @@ async def test_asgi_pathsend_events(tmpdir: Path) -> None:
         "extensions": {"http.response.pathsend": {}},
     }
 
-    async def receive() -> Message:
-        raise NotImplementedError("Should not be called!")  # pragma: no cover
+    async def receive() -> AsyncIterator[Message]:
+        yield {"type": "http.request", "body": b"", "more_body": False}
 
     async def send(message: Message) -> None:
         events.append(message)
         if message["type"] == "http.response.pathsend":
             response_complete.set()
 
-    await app(scope, receive, send)
+    rcv = receive()
+    await app(scope, rcv.__anext__, send)
+    await rcv.aclose()
 
     assert len(events) == 2
     assert events[0]["type"] == "http.response.start"
@@ -1316,3 +1340,194 @@ def test_error_context_propagation(test_client_factory: TestClientFactory) -> No
     assert str(ctx.value) == "Outer exception"
     assert ctx.value.__cause__ is not None
     assert str(ctx.value.__cause__) == "Inner exception"
+
+
+def test_middleware_partial_stream_then_endpoint_body(
+    test_client_factory: TestClientFactory,
+) -> None:
+    """When middleware partially consumes stream() then calls call_next,
+    the endpoint should receive the FULL body via body()."""
+
+    async def homepage(request: Request) -> PlainTextResponse:
+        body = await request.body()
+        assert body == b"hello world"
+        return PlainTextResponse(body)
+
+    class PartialConsumingMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self,
+            request: Request,
+            call_next: RequestResponseEndpoint,
+        ) -> Response:
+            # Read only the first chunk from the stream
+            async for chunk in request.stream():  # pragma: no branch
+                assert chunk == b"hello world"
+                break
+            return await call_next(request)
+
+    app = Starlette(
+        routes=[Route("/", homepage, methods=["POST"])],
+        middleware=[Middleware(PartialConsumingMiddleware)],
+    )
+
+    client: TestClient = test_client_factory(app)
+    response = client.post("/", content=b"hello world")
+    assert response.status_code == 200
+    assert response.content == b"hello world"
+
+
+def test_middleware_form_then_endpoint_body(
+    test_client_factory: TestClientFactory,
+) -> None:
+    """When middleware calls form() (which consumes stream internally),
+    the endpoint should still get the full raw body via body()."""
+
+    async def homepage(request: Request) -> PlainTextResponse:
+        body = await request.body()
+        assert body == b"key=value&foo=bar"
+        return PlainTextResponse(body)
+
+    class FormConsumingMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self,
+            request: Request,
+            call_next: RequestResponseEndpoint,
+        ) -> Response:
+            form = await request.form()
+            assert form["key"] == "value"
+            assert form["foo"] == "bar"
+            return await call_next(request)
+
+    app = Starlette(
+        routes=[Route("/", homepage, methods=["POST"])],
+        middleware=[Middleware(FormConsumingMiddleware)],
+    )
+
+    client: TestClient = test_client_factory(app)
+    response = client.post(
+        "/",
+        content=b"key=value&foo=bar",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 200
+    assert response.content == b"key=value&foo=bar"
+
+
+def test_middleware_body_then_endpoint_form(
+    test_client_factory: TestClientFactory,
+) -> None:
+    """When middleware calls body() and endpoint calls form(),
+    the endpoint should parse the full form correctly."""
+
+    async def homepage(request: Request) -> PlainTextResponse:
+        form = await request.form()
+        assert form["key"] == "value"
+        assert form["foo"] == "bar"
+        return PlainTextResponse("OK")
+
+    class BodyConsumingMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self,
+            request: Request,
+            call_next: RequestResponseEndpoint,
+        ) -> Response:
+            body = await request.body()
+            assert body == b"key=value&foo=bar"
+            return await call_next(request)
+
+    app = Starlette(
+        routes=[Route("/", homepage, methods=["POST"])],
+        middleware=[Middleware(BodyConsumingMiddleware)],
+    )
+
+    client: TestClient = test_client_factory(app)
+    response = client.post(
+        "/",
+        content=b"key=value&foo=bar",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 200
+    assert response.text == "OK"
+
+
+def test_middleware_stream_then_endpoint_form(
+    test_client_factory: TestClientFactory,
+) -> None:
+    """When middleware fully consumes stream() and endpoint calls form(),
+    the endpoint should parse the form correctly from the replayed body."""
+
+    async def homepage(request: Request) -> PlainTextResponse:
+        form = await request.form()
+        assert form["key"] == "value"
+        assert form["foo"] == "bar"
+        return PlainTextResponse("OK")
+
+    class StreamConsumingMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self,
+            request: Request,
+            call_next: RequestResponseEndpoint,
+        ) -> Response:
+            chunks: list[bytes] = []
+            async for chunk in request.stream():
+                if chunk:
+                    chunks.append(chunk)
+            assert b"".join(chunks) == b"key=value&foo=bar"
+            return await call_next(request)
+
+    app = Starlette(
+        routes=[Route("/", homepage, methods=["POST"])],
+        middleware=[Middleware(StreamConsumingMiddleware)],
+    )
+
+    client: TestClient = test_client_factory(app)
+    response = client.post(
+        "/",
+        content=b"key=value&foo=bar",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 200
+    assert response.text == "OK"
+
+
+@pytest.mark.anyio
+async def test_disconnect_during_body_drain() -> None:
+    """When the client disconnects before or during body drain in call_next,
+    the endpoint should handle ClientDisconnect gracefully."""
+
+    async def endpoint(scope: Scope, receive: Receive, send: Send) -> None:
+        request = Request(scope, receive)
+        try:
+            await request.body()
+        except ClientDisconnect:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError("Should have raised ClientDisconnect")
+        await Response(b"ok")(scope, receive, send)
+
+    class PassthroughMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self,
+            request: Request,
+            call_next: RequestResponseEndpoint,
+        ) -> Response:
+            # Middleware doesn't touch the body at all
+            return await call_next(request)
+
+    scope = {"type": "http", "method": "POST", "path": "/"}
+
+    async def receive() -> AsyncIterator[Message]:
+        yield {"type": "http.disconnect"}
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    app: ASGIApp = PassthroughMiddleware(endpoint)
+
+    rcv = receive()
+    await app(scope, rcv.__anext__, send)
+    await rcv.aclose()
+
+    assert any(msg["type"] == "http.response.start" and msg["status"] == 200 for msg in sent)
