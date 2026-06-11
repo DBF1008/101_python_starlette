@@ -4,7 +4,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from enum import Enum
 from tempfile import SpooledTemporaryFile
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote_plus
 
 from starlette.datastructures import FormData, Headers, UploadFile
@@ -122,6 +122,9 @@ class FormParser:
         return FormData(items)
 
 
+_UNSET: Any = object()
+
+
 class MultiPartParser:
     spool_max_size = 1024 * 1024  # 1MB
     """The maximum size of the spooled temporary file used to store file data."""
@@ -136,6 +139,7 @@ class MultiPartParser:
         max_files: int | float = 1000,
         max_fields: int | float = 1000,
         max_part_size: int = 1024 * 1024,  # 1MB
+        spool_max_size: int | None = _UNSET,
     ) -> None:
         assert multipart is not None, "The `python-multipart` library must be installed to use form parsing."
         self.headers = headers
@@ -153,6 +157,8 @@ class MultiPartParser:
         self._file_parts_to_finish: list[MultipartPart] = []
         self._files_to_close_on_error: list[SpooledTemporaryFile[bytes]] = []
         self.max_part_size = max_part_size
+        if spool_max_size is not _UNSET:
+            self.spool_max_size = spool_max_size
 
     def on_part_begin(self) -> None:
         self._current_part = MultipartPart()

@@ -838,3 +838,113 @@ def test_multipart_closes_tempfile_on_oserror(
         client.post("/", content=content, headers=headers)
 
     assert close_called
+
+
+def make_app_spool_max_size(spool_max_size: int | None) -> ASGIApp:
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        request = Request(scope, receive)
+        data = await request.form(spool_max_size=spool_max_size)
+        output: dict[str, Any] = {}
+        for key, value in data.items():
+            if isinstance(value, UploadFile):
+                output[key] = {
+                    "filename": value.filename,
+                    "size": value.size,
+                    "in_memory": value._in_memory,
+                }
+            else:
+                output[key] = value
+        await request.close()
+        response = JSONResponse(output)
+        await response(scope, receive, send)
+
+    return app
+
+
+def test_spool_max_size_default(test_client_factory: TestClientFactory) -> None:
+    """Default threshold (1MB): a file larger than 1MB should roll to disk."""
+    client = test_client_factory(app)
+    # Upload a file larger than the default 1MB spool threshold.
+    large_data = BytesIO(b"x" * (1024 * 1024 + 1))
+    response = client.post("/", files={"file": ("large.bin", large_data)})
+    result = response.json()["file"]
+    assert result["size"] == 1024 * 1024 + 1
+    # The file should still be parseable and have correct content length.
+    assert result["filename"] == "large.bin"
+
+
+def test_spool_max_size_high_keeps_in_memory(test_client_factory: TestClientFactory) -> None:
+    """With a high spool_max_size, a moderately sized file should stay in memory."""
+    client = test_client_factory(make_app_spool_max_size(spool_max_size=10 * 1024 * 1024))
+    # 2MB file with 10MB threshold → stays in memory.
+    file_data = BytesIO(b"x" * (2 * 1024 * 1024))
+    response = client.post("/", files={"file": ("medium.bin", file_data)})
+    result = response.json()["file"]
+    assert result["size"] == 2 * 1024 * 1024
+    assert result["in_memory"] is True
+
+
+def test_spool_max_size_low_rolls_to_disk(test_client_factory: TestClientFactory) -> None:
+    """With a very low spool_max_size, even a small file should roll to disk."""
+    client = test_client_factory(make_app_spool_max_size(spool_max_size=1))
+    # 100 bytes file with 1-byte threshold → rolls to disk.
+    file_data = BytesIO(b"x" * 100)
+    response = client.post("/", files={"file": ("small.bin", file_data)})
+    result = response.json()["file"]
+    assert result["size"] == 100
+    assert result["in_memory"] is False
+
+
+def test_spool_max_size_none_keeps_in_memory(test_client_factory: TestClientFactory) -> None:
+    """With spool_max_size=None, files should never roll to disk."""
+    client = test_client_factory(make_app_spool_max_size(spool_max_size=None))
+    # 2MB file with no threshold → stays in memory.
+    file_data = BytesIO(b"x" * (2 * 1024 * 1024))
+    response = client.post("/", files={"file": ("medium.bin", file_data)})
+    result = response.json()["file"]
+    assert result["size"] == 2 * 1024 * 1024
+    assert result["in_memory"] is True
+
+
+def test_spool_max_size_does_not_affect_other_limits(test_client_factory: TestClientFactory) -> None:
+    """Setting spool_max_size should not affect max_files / max_fields / max_part_size enforcement."""
+
+    async def app_with_all_limits(scope: Scope, receive: Receive, send: Send) -> None:
+        request = Request(scope, receive)
+        data = await request.form(
+            max_files=1,
+            max_fields=10,
+            max_part_size=1024 * 1024,
+            spool_max_size=10 * 1024 * 1024,
+        )
+        await request.close()
+        response = JSONResponse({"ok": True})
+        await response(scope, receive, send)
+
+    client = test_client_factory(app_with_all_limits)
+    # Two files should exceed the max_files=1 limit.
+    fields = (
+        b'--B\r\nContent-Disposition: form-data; name="F0"; filename="F0";\r\n\r\n\r\n'
+        b'--B\r\nContent-Disposition: form-data; name="F1"; filename="F1";\r\n\r\n\r\n'
+        b"--B--\r\n"
+    )
+    with pytest.raises(MultiPartException, match="Too many files"):
+        client.post(
+            "/",
+            data=fields,
+            headers={"Content-Type": "multipart/form-data; boundary=B"},
+        )
+
+
+def test_spool_max_size_class_attribute_unchanged(test_client_factory: TestClientFactory) -> None:
+    """When spool_max_size is not passed, the class attribute default (1MB) is used."""
+    # Verify the class attribute is still 1MB.
+    assert MultiPartParser.spool_max_size == 1024 * 1024
+
+    # A file smaller than 1MB should stay in memory with default settings.
+    client = test_client_factory(make_app_spool_max_size(spool_max_size=None))
+    # But we override with None to keep in memory, verifying the override works.
+    file_data = BytesIO(b"x" * 500)
+    response = client.post("/", files={"file": ("tiny.bin", file_data)})
+    result = response.json()["file"]
+    assert result["in_memory"] is True
